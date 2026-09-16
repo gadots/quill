@@ -1,6 +1,7 @@
 import AppKit
 import ArgumentParser
 import Foundation
+import QuillCore
 
 @main
 struct Quill: ParsableCommand {

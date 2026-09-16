@@ -1,12 +1,5 @@
 import Foundation
-
-/// One timed span of recognized speech from a single track, relative to that
-/// track's own start.
-struct TranscriptSegment: Sendable {
-    let start: TimeInterval
-    let end: TimeInterval
-    let text: String
-}
+import QuillCore
 
 /// A speech-to-text engine quill can run locally. Engines are prepared lazily
 /// (model download + load) when the transcription queue has work and released

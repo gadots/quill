@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import QuillCore
 
 /// Records the default input device to a file via AVAudioEngine, encoding AAC
 /// mono. Buffers stream straight to disk — nothing is held in memory, so

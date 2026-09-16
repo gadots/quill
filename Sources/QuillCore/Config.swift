@@ -13,34 +13,34 @@ import Foundation
 /// ~/Recordings. `on_stop` is a shell command spawned with the session
 /// directory as its argument — after the transcript is written, or right
 /// after recording when transcription is disabled.
-enum Config {
-    static let path = FileManager.default.homeDirectoryForCurrentUser
+public enum Config {
+    public static let path = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/quill/config.json")
 
-    static let defaultRoot = FileManager.default.homeDirectoryForCurrentUser
+    public static let defaultRoot = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Recordings", isDirectory: true)
 
     /// The configured recordings root, or nil if no config file / no key.
-    static func recordingsDir() -> URL? {
+    public static func recordingsDir() -> URL? {
         guard let dir = load()?["recordings_dir"] as? String, !dir.isEmpty else { return nil }
         return URL(fileURLWithPath: (dir as NSString).expandingTildeInPath, isDirectory: true)
     }
 
     /// Shell command to spawn after each session's transcript is written (or
     /// after recording, if transcription is disabled), or nil.
-    static func onStop() -> String? {
+    public static func onStop() -> String? {
         guard let cmd = load()?["on_stop"] as? String, !cmd.isEmpty else { return nil }
         return cmd
     }
 
     /// Whether finished recordings are transcribed automatically. Default on.
-    static func transcriptionEnabled() -> Bool {
+    public static func transcriptionEnabled() -> Bool {
         transcription()?["enabled"] as? Bool ?? true
     }
 
     /// Configured engine name. Only "parakeet" ships today; the coordinator
     /// warns and falls back for anything else.
-    static func transcriptionEngine() -> String {
+    public static func transcriptionEngine() -> String {
         transcription()?["engine"] as? String ?? "parakeet"
     }
 
@@ -53,7 +53,7 @@ enum Config {
     /// as "me". Default off — the live voice unit ducks all other playback,
     /// and on headphones there's no echo to cancel anyway. Set true when
     /// recording meetings through the speakers.
-    static func micVoiceProcessing() -> Bool {
+    public static func micVoiceProcessing() -> Bool {
         load()?["mic_voice_processing"] as? Bool ?? false
     }
 
@@ -75,7 +75,7 @@ enum Config {
     }
 
     /// Resolve the recordings root from an optional CLI override.
-    static func resolveRoot(cliOverride: String?) -> URL {
+    public static func resolveRoot(cliOverride: String?) -> URL {
         if let cliOverride {
             return URL(
                 fileURLWithPath: (cliOverride as NSString).expandingTildeInPath,

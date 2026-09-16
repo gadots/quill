@@ -1,6 +1,7 @@
 import AVFoundation
 import FluidAudio
 import Foundation
+import QuillCore
 
 enum CheckStatus {
     case ok
