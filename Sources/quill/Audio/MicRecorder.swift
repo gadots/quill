@@ -16,7 +16,11 @@ final class MicRecorder: @unchecked Sendable {
     enum RecorderError: Error, CustomStringConvertible {
         case engineStartFailed(Error)
         case fileCreationFailed(Error)
-        case formatUnsupported(AVAudioFormat)
+        /// The offending format, already rendered. `Error` implies
+        /// `Sendable` under Swift 6 and `AVAudioFormat` is a non-Sendable
+        /// class, so the description is captured at the throw site rather
+        /// than the format itself.
+        case formatUnsupported(String)
 
         var description: String {
             switch self {
@@ -97,7 +101,7 @@ final class MicRecorder: @unchecked Sendable {
             channels: 1,
             interleaved: false
         ) else {
-            throw RecorderError.formatUnsupported(inputFormat)
+            throw RecorderError.formatUnsupported("\(inputFormat)")
         }
 
         let settings: [String: Any] = [
@@ -188,7 +192,7 @@ final class MicRecorder: @unchecked Sendable {
         monoFormat: AVAudioFormat
     ) throws {
         guard let converter = AVAudioConverter(from: inputFormat, to: monoFormat) else {
-            throw RecorderError.formatUnsupported(inputFormat)
+            throw RecorderError.formatUnsupported("\(inputFormat)")
         }
         input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
             guard let self, let file = self.file else { return }
