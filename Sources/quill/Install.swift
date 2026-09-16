@@ -46,14 +46,20 @@ struct Install: ParsableCommand {
     private func writeAgent() throws {
         let binary = try resolveBinaryPath()
 
+        // Not /tmp: those logs carry session paths and are readable by every
+        // user on the machine, with nothing rotating them.
+        let logDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/quill", isDirectory: true)
+        try FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+
         let plist: [String: Any] = [
             "Label": Self.label,
             "ProgramArguments": [binary, "run"],
             "RunAtLoad": true,
             "KeepAlive": ["SuccessfulExit": false] as [String: Any],
             "ProcessType": "Interactive",
-            "StandardOutPath": "/tmp/quill.out.log",
-            "StandardErrorPath": "/tmp/quill.err.log",
+            "StandardOutPath": logDir.appendingPathComponent("quill.out.log").path,
+            "StandardErrorPath": logDir.appendingPathComponent("quill.err.log").path,
         ]
 
         let url = plistURL
@@ -80,7 +86,7 @@ struct Install: ParsableCommand {
         print("✓ launch-at-login installed")
         print("  plist:  \(url.path)")
         print("  binary: \(binary)")
-        print("  logs:   /tmp/quill.out.log, /tmp/quill.err.log")
+        print("  logs:   \(logDir.path)/quill.{out,err}.log")
     }
 
     private func removeAgent() throws {
