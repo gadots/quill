@@ -56,23 +56,48 @@ final class RecordingSession {
         system.stop()
 
         let ended = Date()
-        let iso = ISO8601DateFormatter()
 
-        // The tracks don't start on the same buffer; record how far each
-        // lags the earliest so transcript timestamps share one clock.
-        let micStart = mic.firstBufferAt ?? startedAt
-        let systemStart = system.firstBufferAt ?? startedAt
-        let earliest = min(micStart, systemStart)
-
-        writeMeta([
+        var meta: [String: Any] = [
             "status": SessionMeta.Status.finished.rawValue,
-            "ended": iso.string(from: ended),
+            "ended": ISO8601DateFormatter().string(from: ended),
             "duration_seconds": Int(ended.timeIntervalSince(startedAt)),
-            "start_offset_ms": [
-                "mic": Int(micStart.timeIntervalSince(earliest) * 1000),
-                "system": Int(systemStart.timeIntervalSince(earliest) * 1000),
-            ],
-        ])
+            "start_offset_ms": startOffsetsMs(),
+        ]
+        // What the devices actually ran at. The mic engine and the tap's
+        // aggregate keep separate clocks, and the difference accumulates
+        // across a long meeting; the transcript merge scales by nominal ÷
+        // measured to put both back on real time.
+        var nominal: [String: Double] = [:]
+        var measured: [String: Double] = [:]
+        if mic.nominalSampleRate > 0 { nominal["mic"] = mic.nominalSampleRate }
+        if system.nominalSampleRate > 0 { nominal["system"] = system.nominalSampleRate }
+        if let rate = mic.measuredSampleRate { measured["mic"] = rate }
+        if let rate = system.measuredSampleRate { measured["system"] = rate }
+        if !nominal.isEmpty { meta["nominal_sample_rate"] = nominal }
+        if !measured.isEmpty { meta["measured_sample_rate"] = measured }
+
+        writeMeta(meta)
+    }
+
+    /// How far each track's first buffer lagged the earlier of the two, on the
+    /// host clock both are stamped from. A track that never produced a buffer
+    /// gets 0 — there is nothing to align.
+    private func startOffsetsMs() -> [String: Int] {
+        let stamps = [("mic", mic.firstHostTime), ("system", system.firstHostTime)]
+        let present = stamps.compactMap(\.1)
+        guard let earliest = present.min() else { return ["mic": 0, "system": 0] }
+
+        var offsets: [String: Int] = [:]
+        for (name, stamp) in stamps {
+            guard let stamp else {
+                offsets[name] = 0
+                continue
+            }
+            offsets[name] = Int(
+                (HostClock.seconds(from: earliest, to: stamp) * 1000).rounded()
+            )
+        }
+        return offsets
     }
 
     // MARK: -

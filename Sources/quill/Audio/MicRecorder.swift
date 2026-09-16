@@ -36,9 +36,36 @@ final class MicRecorder: @unchecked Sendable {
     private var file: AVAudioFile?
     private var url: URL?
     private(set) var isRecording = false
-    /// Wall-clock time of the first captured buffer — the track's true start,
-    /// used to offset-align the two tracks' transcript timestamps.
-    private(set) var firstBufferAt: Date?
+
+    /// Capture-clock observations, used to align this track against the system
+    /// track and to correct for the mic device's clock drifting from the tap's.
+    /// Written from the tap callback, read on main at stop.
+    private let clockLock = NSLock()
+    private var clock = TrackClock()
+    private(set) var nominalSampleRate: Double = 0
+
+    /// Host time of the first captured buffer — this track's true start.
+    var firstHostTime: UInt64? {
+        clockLock.lock()
+        defer { clockLock.unlock() }
+        return clock.firstHostTime
+    }
+
+    /// Frames per second the device actually delivered, or nil if too little
+    /// audio was captured to tell.
+    var measuredSampleRate: Double? {
+        clockLock.lock()
+        defer { clockLock.unlock() }
+        guard let span = clock.span else { return nil }
+        return clock.measuredRate(elapsed: HostClock.seconds(from: span.first, to: span.last))
+    }
+
+    private func observe(_ time: AVAudioTime?, frames: AVAudioFrameCount) {
+        let host = HostClock.hostTime(of: time)
+        clockLock.lock()
+        clock.record(hostTime: host, frames: Int64(frames))
+        clockLock.unlock()
+    }
 
     // Liveness check state (voice-processing path only). Written from the tap
     // callback, read on main when deciding to fall back.
@@ -105,6 +132,7 @@ final class MicRecorder: @unchecked Sendable {
             throw RecorderError.formatUnsupported("\(inputFormat)")
         }
 
+        nominalSampleRate = monoFormat.sampleRate
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: monoFormat.sampleRate,
@@ -156,9 +184,9 @@ final class MicRecorder: @unchecked Sendable {
     /// the only recovery is restarting raw.
     private func installVoiceTap(on input: AVAudioInputNode, format: AVAudioFormat) {
         let checkFrames = Int(format.sampleRate)
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, when in
             guard let self, let file = self.file else { return }
-            if self.firstBufferAt == nil { self.firstBufferAt = Date() }
+            self.observe(when, frames: buffer.frameLength)
 
             if !self.livenessSettled {
                 let frames = Int(buffer.frameLength)
@@ -195,9 +223,9 @@ final class MicRecorder: @unchecked Sendable {
         guard let converter = AVAudioConverter(from: inputFormat, to: monoFormat) else {
             throw RecorderError.formatUnsupported("\(inputFormat)")
         }
-        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
+        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, when in
             guard let self, let file = self.file else { return }
-            if self.firstBufferAt == nil { self.firstBufferAt = Date() }
+            self.observe(when, frames: buffer.frameLength)
             guard let mono = AVAudioPCMBuffer(
                 pcmFormat: monoFormat,
                 frameCapacity: buffer.frameCapacity
@@ -222,7 +250,9 @@ final class MicRecorder: @unchecked Sendable {
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
         file = nil
-        firstBufferAt = nil
+        clockLock.lock()
+        clock = TrackClock()
+        clockLock.unlock()
         if let url {
             try? FileManager.default.removeItem(at: url)
         }

@@ -157,12 +157,12 @@ actor TranscriptionCoordinator {
                 log(dir, "skipping \(track.file): \(error)")
                 continue
             }
-            let offset = TimeInterval(track.offsetMs) / 1000
+            let alignment = track.alignment
             merged += segments.map {
                 Transcript.Segment(
                     speaker: track.speaker,
-                    start_ms: Int(($0.start + offset) * 1000),
-                    end_ms: Int(($0.end + offset) * 1000),
+                    start_ms: alignment.sessionMilliseconds($0.start),
+                    end_ms: alignment.sessionMilliseconds($0.end),
                     text: $0.text
                 )
             }

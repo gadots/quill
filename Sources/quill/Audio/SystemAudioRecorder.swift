@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreAudio
 import Foundation
+import QuillCore
 
 /// Records all system audio output to a file via a Core Audio process tap
 /// (macOS 14.2+). No virtual device, no kernel extension — the tap mixes every
@@ -35,9 +36,28 @@ final class SystemAudioRecorder {
     private var file: AVAudioFile?
     private let queue = DispatchQueue(label: "com.digimata.quill.system-tap")
     private(set) var isRecording = false
-    /// Wall-clock time of the first captured buffer — the track's true start,
-    /// used to offset-align the two tracks' transcript timestamps.
-    private(set) var firstBufferAt: Date?
+
+    /// Capture-clock observations, on the same host clock as the mic track.
+    /// Written from the IO proc's queue, read on main at stop.
+    private let clockLock = NSLock()
+    private var clock = TrackClock()
+    private(set) var nominalSampleRate: Double = 0
+
+    /// Host time of the first captured buffer — this track's true start.
+    var firstHostTime: UInt64? {
+        clockLock.lock()
+        defer { clockLock.unlock() }
+        return clock.firstHostTime
+    }
+
+    /// Frames per second the tap actually delivered, or nil if too little
+    /// audio was captured to tell.
+    var measuredSampleRate: Double? {
+        clockLock.lock()
+        defer { clockLock.unlock() }
+        guard let span = clock.span else { return nil }
+        return clock.measuredRate(elapsed: HostClock.seconds(from: span.first, to: span.last))
+    }
 
     /// Start capturing system audio, encoding AAC into `url` (use a .caf
     /// extension — CAF needs no finalization pass, so a crash mid-meeting
@@ -57,6 +77,7 @@ final class SystemAudioRecorder {
 
         do {
             let format = try tapStreamFormat()
+            nominalSampleRate = format.sampleRate
             try createAggregateDevice(tapUUID: description.uuid)
             file = try makeFile(url: url, format: format)
             try installIOProc(format: format)
@@ -136,14 +157,20 @@ final class SystemAudioRecorder {
 
     private func installIOProc(format: AVAudioFormat) throws {
         var status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, queue) {
-            [weak self] _, inInputData, _, _, _ in
+            [weak self] _, inInputData, inInputTime, _, _ in
             guard let self, let file = self.file else { return }
-            if self.firstBufferAt == nil { self.firstBufferAt = Date() }
             guard let buffer = AVAudioPCMBuffer(
                 pcmFormat: format,
                 bufferListNoCopy: inInputData,
                 deallocator: nil
             ) else { return }
+            // The stamp the HAL already hands us, on the same clock the mic
+            // tap is stamped from — far tighter than reading the wall clock
+            // here, which trails by the buffer duration plus scheduling.
+            let host = HostClock.hostTime(of: inInputTime)
+            self.clockLock.lock()
+            self.clock.record(hostTime: host, frames: Int64(buffer.frameLength))
+            self.clockLock.unlock()
             do {
                 try file.write(from: buffer)
             } catch {

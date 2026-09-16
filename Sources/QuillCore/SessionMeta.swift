@@ -16,11 +16,19 @@ public struct SessionMeta: Equatable {
         public let file: String
         public let speaker: String
         public let offsetMs: Int
+        /// nominal ÷ measured sample rate for the device that captured this
+        /// track. 1.0 when the session predates the measurement.
+        public let rateScale: Double
 
-        public init(file: String, speaker: String, offsetMs: Int) {
+        public init(file: String, speaker: String, offsetMs: Int, rateScale: Double = 1) {
             self.file = file
             self.speaker = speaker
             self.offsetMs = offsetMs
+            self.rateScale = rateScale
+        }
+
+        public var alignment: TrackAlignment {
+            TrackAlignment(offsetMs: offsetMs, rateScale: rateScale)
         }
     }
 
@@ -80,12 +88,28 @@ public struct SessionMeta: Equatable {
         // Sessions written before `status` existed only ever got a meta.json
         // on a clean stop, so absence means finished.
         let status = (json["status"] as? String).flatMap(Status.init(rawValue:)) ?? .finished
+
+        // Absent for sessions recorded before the clocks were measured, which
+        // is exactly what a 1.0 scale means.
+        let nominal = json["nominal_sample_rate"] as? [String: Double] ?? [:]
+        let measured = json["measured_sample_rate"] as? [String: Double] ?? [:]
+        func scale(_ key: String) -> Double {
+            TrackAlignment.rateScale(nominal: nominal[key] ?? 0, measured: measured[key])
+        }
+
         var tracks: [Track] = []
         if let mic = files["mic"] {
-            tracks.append(Track(file: mic, speaker: "me", offsetMs: offsets["mic"] ?? 0))
+            tracks.append(Track(
+                file: mic, speaker: "me", offsetMs: offsets["mic"] ?? 0, rateScale: scale("mic")
+            ))
         }
         if let system = files["system"] {
-            tracks.append(Track(file: system, speaker: "them", offsetMs: offsets["system"] ?? 0))
+            tracks.append(Track(
+                file: system,
+                speaker: "them",
+                offsetMs: offsets["system"] ?? 0,
+                rateScale: scale("system")
+            ))
         }
         return SessionMeta(tracks: tracks, status: status)
     }
