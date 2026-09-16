@@ -1,4 +1,5 @@
 import Foundation
+import QuillCore
 
 /// One meeting recording: a timestamped folder holding two independent tracks
 /// (mic = you, system = them) plus a meta.json written on clean stop. Tracks
@@ -42,6 +43,11 @@ final class RecordingSession {
             system.stop()
             throw error
         }
+        // Mark the session as live before any audio is captured. Until this
+        // existed, meta.json was written only on a clean stop, so a session cut
+        // short by a crash or power loss left audio on disk that resumePending
+        // would never look at again.
+        writeMeta(["status": SessionMeta.Status.recording.rawValue])
     }
 
     /// Stop both tracks and write meta.json.
@@ -58,21 +64,32 @@ final class RecordingSession {
         let systemStart = system.firstBufferAt ?? startedAt
         let earliest = min(micStart, systemStart)
 
-        let meta: [String: Any] = [
-            "started": iso.string(from: startedAt),
+        writeMeta([
+            "status": SessionMeta.Status.finished.rawValue,
             "ended": iso.string(from: ended),
             "duration_seconds": Int(ended.timeIntervalSince(startedAt)),
-            "files": ["mic": "mic.caf", "system": "system.caf"],
             "start_offset_ms": [
                 "mic": Int(micStart.timeIntervalSince(earliest) * 1000),
                 "system": Int(systemStart.timeIntervalSince(earliest) * 1000),
             ],
+        ])
+    }
+
+    // MARK: -
+
+    /// Write meta.json with the fields every session always has, plus whatever
+    /// the caller adds. Atomic, so a reader never sees a half-written file.
+    private func writeMeta(_ extra: [String: Any]) {
+        var meta: [String: Any] = [
+            "started": ISO8601DateFormatter().string(from: startedAt),
+            "files": ["mic": "mic.caf", "system": "system.caf"],
         ]
-        if let data = try? JSONSerialization.data(
+        meta.merge(extra) { _, new in new }
+
+        guard let data = try? JSONSerialization.data(
             withJSONObject: meta,
             options: [.prettyPrinted, .sortedKeys]
-        ) {
-            try? data.write(to: dir.appendingPathComponent("meta.json"))
-        }
+        ) else { return }
+        try? data.write(to: dir.appendingPathComponent("meta.json"), options: .atomic)
     }
 }

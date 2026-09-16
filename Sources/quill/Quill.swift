@@ -121,7 +121,9 @@ final class AppController {
             let newSession = try RecordingSession(root: root)
             try newSession.start()
             session = newSession
-            FileHandle.standardError.write(Data("● recording → \(newSession.dir.path)\n".utf8))
+            let dir = newSession.dir
+            Task { [transcription] in await transcription.setActiveSession(dir) }
+            FileHandle.standardError.write(Data("● recording → \(dir.path)\n".utf8))
         } catch {
             FileHandle.standardError.write(Data("recording start failed: \(error)\n".utf8))
             notifyUser(title: "quill — recording failed", body: "\(error)")
@@ -147,7 +149,12 @@ final class AppController {
         menuBar.update(recording: false, elapsed: nil)
 
         let dir = session.dir
-        Task { [transcription] in await transcription.enqueue(dir) }
+        Task { [transcription] in
+            // Clear first: both hops land on the same actor in order, so the
+            // session is no longer "live" by the time it is queued.
+            await transcription.setActiveSession(nil)
+            await transcription.enqueue(dir)
+        }
     }
 
     private func showTranscription(_ status: TranscriptionCoordinator.Status) {

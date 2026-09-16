@@ -3,6 +3,15 @@ import Foundation
 /// The slice of meta.json the transcription pipeline needs: which files exist,
 /// who they represent, and how far each track started after the earliest one.
 public struct SessionMeta: Equatable {
+    /// Whether the session reached a clean stop. Written at start as
+    /// `.recording` and rewritten at stop, so a session interrupted by a
+    /// crash, a forced quit or power loss is still identifiable as one that
+    /// has audio worth transcribing.
+    public enum Status: String, Sendable, Equatable {
+        case recording
+        case finished
+    }
+
     public struct Track: Equatable {
         public let file: String
         public let speaker: String
@@ -16,9 +25,29 @@ public struct SessionMeta: Equatable {
     }
 
     public let tracks: [Track]
+    public let status: Status
 
-    public init(tracks: [Track]) {
+    public init(tracks: [Track], status: Status = .finished) {
         self.tracks = tracks
+        self.status = status
+    }
+
+    /// The track files a session is expected to hold, in merge order.
+    public static let knownTracks: [(file: String, speaker: String)] = [
+        (file: "mic.caf", speaker: "me"),
+        (file: "system.caf", speaker: "them"),
+    ]
+
+    /// What a session looks like when meta.json is missing or unparseable:
+    /// derived from whichever known track files are actually present. Takes a
+    /// predicate rather than touching disk so the rule stays testable.
+    public static func recovered(fileExists: (String) -> Bool) -> SessionMeta {
+        SessionMeta(
+            tracks: knownTracks
+                .filter { fileExists($0.file) }
+                .map { Track(file: $0.file, speaker: $0.speaker, offsetMs: 0) },
+            status: .recording
+        )
     }
 
     public enum MetaError: Error, CustomStringConvertible {
@@ -48,6 +77,9 @@ public struct SessionMeta: Equatable {
         // Sessions recorded before offsets were captured default to 0 —
         // tracks start within tens of milliseconds of each other anyway.
         let offsets = json["start_offset_ms"] as? [String: Int] ?? [:]
+        // Sessions written before `status` existed only ever got a meta.json
+        // on a clean stop, so absence means finished.
+        let status = (json["status"] as? String).flatMap(Status.init(rawValue:)) ?? .finished
         var tracks: [Track] = []
         if let mic = files["mic"] {
             tracks.append(Track(file: mic, speaker: "me", offsetMs: offsets["mic"] ?? 0))
@@ -55,6 +87,6 @@ public struct SessionMeta: Equatable {
         if let system = files["system"] {
             tracks.append(Track(file: system, speaker: "them", offsetMs: offsets["system"] ?? 0))
         }
-        return SessionMeta(tracks: tracks)
+        return SessionMeta(tracks: tracks, status: status)
     }
 }
