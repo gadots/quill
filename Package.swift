@@ -9,9 +9,16 @@ let package = Package(
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.7.0"),
     ],
     targets: [
+        // Pure-Foundation logic: transcript model and rendering, session
+        // metadata, segment grouping, config. Split out from the executable so
+        // it can be imported by tests — an executable target can't be. Nothing
+        // here touches AVFoundation, Core Audio or AppKit, so it builds and
+        // tests anywhere, in seconds.
+        .target(name: "QuillCore"),
         .executableTarget(
             name: "quill",
             dependencies: [
+                "QuillCore",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ],
@@ -28,5 +35,6 @@ let package = Package(
                 ]),
             ]
         ),
+        .testTarget(name: "QuillCoreTests", dependencies: ["QuillCore"]),
     ]
 )

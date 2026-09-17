@@ -9,6 +9,11 @@ final class MenuBarController {
     private let stateLabel: NSMenuItem
     private let transcriptionLabel: NSMenuItem
     private let toggleItem: NSMenuItem
+    private let menu: NSMenu
+    /// Problem rows sit above the state label and are rebuilt wholesale, so
+    /// they're tracked separately from the fixed items.
+    private var problemItems: [NSMenuItem] = []
+    private var problems: [Problem] = []
 
     var onToggle: (() -> Void)?
     var onOpenFolder: (() -> Void)?
@@ -17,7 +22,7 @@ final class MenuBarController {
     init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
-        let menu = NSMenu()
+        menu = NSMenu()
         menu.autoenablesItems = false
 
         stateLabel = NSMenuItem(title: "idle", action: nil, keyEquivalent: "")
@@ -75,7 +80,54 @@ final class MenuBarController {
     func update(recording: Bool, elapsed: String?) {
         stateLabel.title = recording ? "● recording · \(elapsed ?? "0:00")" : "idle"
         toggleItem.title = recording ? "Stop recording" : "Start recording"
-        statusItem.button?.contentTintColor = recording ? .systemRed : nil
+        // Recording beats a standing problem for the icon tint; the problem
+        // rows stay in the menu either way.
+        statusItem.button?.contentTintColor =
+            recording ? .systemRed : (problems.isEmpty ? nil : .systemOrange)
+    }
+
+    /// Replace the problem rows at the top of the menu. Each failed check
+    /// gets a line, plus a clickable row that opens the Settings pane which
+    /// fixes it. Empty list removes the section.
+    func showProblems(_ problems: [Problem]) {
+        for item in problemItems {
+            menu.removeItem(item)
+        }
+        problemItems = []
+        self.problems = problems
+        guard !problems.isEmpty else {
+            statusItem.button?.contentTintColor = nil
+            return
+        }
+
+        var index = 0
+        for (offset, problem) in problems.enumerated() {
+            let label = NSMenuItem(title: "⚠ \(problem.summary)", action: nil, keyEquivalent: "")
+            label.isEnabled = false
+            menu.insertItem(label, at: index)
+            problemItems.append(label)
+            index += 1
+
+            if problem.settingsURL != nil {
+                let fix = NSMenuItem(
+                    title: "Open Settings to fix…",
+                    action: #selector(problemClicked(_:)),
+                    keyEquivalent: ""
+                )
+                fix.target = self
+                fix.tag = offset
+                menu.insertItem(fix, at: index)
+                problemItems.append(fix)
+                index += 1
+            }
+        }
+
+        let separator = NSMenuItem.separator()
+        menu.insertItem(separator, at: index)
+        problemItems.append(separator)
+
+        statusItem.button?.contentTintColor = .systemOrange
+        statusItem.button?.toolTip = problems.map(\.summary).joined(separator: "\n")
     }
 
     /// Show transcription progress/failure as a second status line in the
@@ -106,6 +158,11 @@ final class MenuBarController {
         // Menu-bar status icons are nominally 18pt tall; size the SVG to match.
         image.size = NSSize(width: 16, height: 16)
         return image
+    }
+
+    @objc private func problemClicked(_ sender: NSMenuItem) {
+        guard problems.indices.contains(sender.tag) else { return }
+        problems[sender.tag].openSettings()
     }
 
     @objc private func toggleClicked() { onToggle?() }

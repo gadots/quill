@@ -38,10 +38,16 @@ Each session lands in `~/Recordings/<yyyy.MM.dd-HHmm>/`:
 |---|---|
 | `mic.caf` | your side (default input device, AAC) |
 | `system.caf` | everything the Mac played — the other side of the call (AAC) |
-| `meta.json` | start/end timestamps, duration, per-track start offsets |
+| `meta.json` | status, start/end timestamps, duration, per-track start offsets and measured sample rates |
 | `transcript.json` | canonical transcript — engine provenance + timed, speaker-tagged segments |
 | `transcript.md` | the same transcript rendered for reading |
 | `transcribe.log` | transcription progress/errors for this session |
+
+Both tracks are stamped from the same mach host clock as buffers arrive, and
+each recorder reports the sample rate its device actually delivered. The
+transcript merge uses both — the start offset to line the tracks up, and
+nominal ÷ measured to undo the drift that builds up between two independent
+hardware clocks over a long meeting.
 
 Two tracks on purpose: speech models do better on clean single-source audio,
 and mic-vs-system is free two-party diarization — `me` vs `them` with no
@@ -61,8 +67,9 @@ meeting.
 Each track is transcribed separately, shifted by its start offset so both
 share one clock, and merged by timestamp. Jobs run in a serial queue — you can
 start a new recording while the last one transcribes. Unfinished jobs resume
-on next launch (the filesystem is the queue: a session with `meta.json` but no
-`transcript.json` is pending). Failures append to the session's
+on next launch (the filesystem is the queue: a session that has audio but no
+`transcript.json` is pending — including one cut short by a crash or power
+loss, which is the reason to record CAF). Failures append to the session's
 `transcribe.log` and never block later jobs.
 
 The engine sits behind a small protocol; a Whisper engine (WhisperKit

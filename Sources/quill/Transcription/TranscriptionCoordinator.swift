@@ -1,4 +1,5 @@
 import Foundation
+import QuillCore
 
 /// Post-recording pipeline: a serial queue of session folders to transcribe.
 /// mic.caf → "me", system.caf → "them"; each track's segments are shifted by
@@ -15,6 +16,14 @@ actor TranscriptionCoordinator {
     }
 
     private var queue: [URL] = []
+    /// Queued plus currently transcribing. `queue` alone isn't enough: the
+    /// session being worked on has already been removed from it, so a second
+    /// scan would hand it out again.
+    private var claimed: Set<URL> = []
+    /// The session being recorded right now, if any. It has a meta.json and
+    /// audio but no transcript, so it matches every "pending" test — and its
+    /// tracks are still open for writing.
+    private var activeSession: URL?
     private var draining = false
     private var engine: TranscriptionEngine?
     private var lastFailure: String?
@@ -24,6 +33,12 @@ actor TranscriptionCoordinator {
         statusHandler = handler
     }
 
+    /// Tell the coordinator which session is live, so a scan never picks up a
+    /// file that is still being written. Pass nil when recording stops.
+    func setActiveSession(_ dir: URL?) {
+        activeSession = dir
+    }
+
     /// Queue a finished session. With transcription disabled in config, the
     /// on_stop hook still fires — it just gets an untranscribed folder.
     func enqueue(_ sessionDir: URL) {
@@ -31,13 +46,18 @@ actor TranscriptionCoordinator {
             runHook(for: sessionDir)
             return
         }
-        queue.append(sessionDir)
+        claim(sessionDir)
         drainIfIdle()
     }
 
-    /// Scan the recordings root for sessions that finished (meta.json exists)
-    /// but were never transcribed. Folder names sort chronologically, so
-    /// oldest-first is a name sort.
+    /// Scan the recordings root for sessions that hold audio but no
+    /// transcript. Folder names sort chronologically, so oldest-first is a
+    /// name sort.
+    ///
+    /// A session is a candidate on the strength of its audio, not its
+    /// bookkeeping: a crash mid-meeting leaves a readable CAF behind (that is
+    /// the whole reason quill records CAF), and it should be transcribed on the
+    /// next launch even if meta.json is missing or truncated.
     func resumePending(root: URL) {
         guard Config.transcriptionEnabled() else { return }
         guard let entries = try? FileManager.default.contentsOfDirectory(
@@ -46,23 +66,38 @@ actor TranscriptionCoordinator {
 
         let fm = FileManager.default
         let pending = entries
-            .filter {
-                fm.fileExists(atPath: $0.appendingPathComponent("meta.json").path)
-                    && !fm.fileExists(atPath: $0.appendingPathComponent("transcript.json").path)
+            .filter { dir in
+                guard !fm.fileExists(
+                    atPath: dir.appendingPathComponent("transcript.json").path
+                ) else { return false }
+                return fm.fileExists(atPath: dir.appendingPathComponent("meta.json").path)
+                    || SessionMeta.knownTracks.contains {
+                        fm.fileExists(atPath: dir.appendingPathComponent($0.file).path)
+                    }
             }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
-        for dir in pending where !queue.contains(dir) {
-            queue.append(dir)
+        var resumed = 0
+        for dir in pending where dir != activeSession {
+            if claim(dir) { resumed += 1 }
         }
-        if !pending.isEmpty {
+        if resumed > 0 {
             FileHandle.standardError.write(Data(
-                "resuming \(pending.count) untranscribed session(s)\n".utf8
+                "resuming \(resumed) untranscribed session(s)\n".utf8
             ))
         }
         drainIfIdle()
     }
 
     // MARK: -
+
+    /// Add a session to the queue unless it is already queued or in
+    /// progress. Returns whether it was newly claimed.
+    @discardableResult
+    private func claim(_ dir: URL) -> Bool {
+        guard claimed.insert(dir).inserted else { return false }
+        queue.append(dir)
+        return true
+    }
 
     private func drainIfIdle() {
         guard !draining, !queue.isEmpty else { return }
@@ -74,6 +109,7 @@ actor TranscriptionCoordinator {
     private func drain() async {
         while !queue.isEmpty {
             let dir = queue.removeFirst()
+            defer { claimed.remove(dir) }
             publish(.transcribing(session: dir.lastPathComponent, queued: queue.count))
             do {
                 try await transcribe(dir)
@@ -98,7 +134,10 @@ actor TranscriptionCoordinator {
     }
 
     private func transcribe(_ dir: URL) async throws {
-        let meta = try SessionMeta.read(from: dir)
+        let meta = try readMeta(dir)
+        if meta.status == .recording {
+            log(dir, "recovering an interrupted session — transcribing what was written")
+        }
         let engine = try await preparedEngine()
 
         var merged: [Transcript.Segment] = []
@@ -118,12 +157,12 @@ actor TranscriptionCoordinator {
                 log(dir, "skipping \(track.file): \(error)")
                 continue
             }
-            let offset = TimeInterval(track.offsetMs) / 1000
+            let alignment = track.alignment
             merged += segments.map {
                 Transcript.Segment(
                     speaker: track.speaker,
-                    start_ms: Int(($0.start + offset) * 1000),
-                    end_ms: Int(($0.end + offset) * 1000),
+                    start_ms: alignment.sessionMilliseconds($0.start),
+                    end_ms: alignment.sessionMilliseconds($0.end),
                     text: $0.text
                 )
             }
@@ -138,6 +177,21 @@ actor TranscriptionCoordinator {
         )
         try transcript.write(to: dir)
         log(dir, "done — \(merged.count) segments")
+    }
+
+    /// meta.json, or — when it is missing or unparseable because the session
+    /// was cut short — whatever tracks are actually on disk.
+    private func readMeta(_ dir: URL) throws -> SessionMeta {
+        if let meta = try? SessionMeta.read(from: dir), !meta.tracks.isEmpty {
+            return meta
+        }
+        let fm = FileManager.default
+        let recovered = SessionMeta.recovered { file in
+            fm.fileExists(atPath: dir.appendingPathComponent(file).path)
+        }
+        guard !recovered.tracks.isEmpty else { throw SessionMeta.MetaError.unreadable(dir) }
+        log(dir, "meta.json missing or unreadable — recovered \(recovered.tracks.count) track(s)")
+        return recovered
     }
 
     private func preparedEngine() async throws -> TranscriptionEngine {
@@ -183,93 +237,5 @@ actor TranscriptionCoordinator {
 
     private func publish(_ status: Status) {
         statusHandler?(status)
-    }
-}
-
-/// The slice of meta.json the coordinator needs: which files exist, who they
-/// represent, and how far each track started after the earliest one.
-private struct SessionMeta {
-    struct Track {
-        let file: String
-        let speaker: String
-        let offsetMs: Int
-    }
-
-    let tracks: [Track]
-
-    enum MetaError: Error, CustomStringConvertible {
-        case unreadable(URL)
-
-        var description: String {
-            switch self {
-            case .unreadable(let url): return "can't parse \(url.path)"
-            }
-        }
-    }
-
-    static func read(from dir: URL) throws -> SessionMeta {
-        let url = dir.appendingPathComponent("meta.json")
-        guard
-            let data = try? Data(contentsOf: url),
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let files = json["files"] as? [String: String]
-        else { throw MetaError.unreadable(url) }
-
-        // Sessions recorded before offsets were captured default to 0 —
-        // tracks start within tens of milliseconds of each other anyway.
-        let offsets = json["start_offset_ms"] as? [String: Int] ?? [:]
-        var tracks: [Track] = []
-        if let mic = files["mic"] {
-            tracks.append(Track(file: mic, speaker: "me", offsetMs: offsets["mic"] ?? 0))
-        }
-        if let system = files["system"] {
-            tracks.append(Track(file: system, speaker: "them", offsetMs: offsets["system"] ?? 0))
-        }
-        return SessionMeta(tracks: tracks)
-    }
-}
-
-/// Canonical transcript. Property names are the JSON schema — this struct
-/// exists to be serialized.
-private struct Transcript: Codable {
-    struct Segment: Codable {
-        let speaker: String
-        let start_ms: Int
-        let end_ms: Int
-        let text: String
-    }
-
-    let engine: String
-    let model: String
-    let created_at: String
-    let segments: [Segment]
-
-    /// Write transcript.json and render transcript.md. Both writes are atomic
-    /// (temp file + rename), so a partially written transcript never exists on
-    /// disk — resumePending treats presence of transcript.json as "done".
-    func write(to dir: URL) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(self)
-            .write(to: dir.appendingPathComponent("transcript.json"), options: .atomic)
-        try Data(rendered(title: dir.lastPathComponent).utf8)
-            .write(to: dir.appendingPathComponent("transcript.md"), options: .atomic)
-    }
-
-    private func rendered(title: String) -> String {
-        var lines = ["# \(title)", "", "engine: \(engine) (\(model))", ""]
-        for seg in segments {
-            lines.append("**[\(Self.clock(seg.start_ms))] \(seg.speaker):** \(seg.text)")
-            lines.append("")
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    private static func clock(_ ms: Int) -> String {
-        let total = ms / 1000
-        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
-        return h > 0
-            ? String(format: "%d:%02d:%02d", h, m, s)
-            : String(format: "%d:%02d", m, s)
     }
 }

@@ -1,6 +1,7 @@
 import AppKit
 import ArgumentParser
 import Foundation
+import QuillCore
 
 @main
 struct Quill: ParsableCommand {
@@ -31,19 +32,23 @@ struct Run: ParsableCommand {
     private func runMain() throws {
         let root = Config.resolveRoot(cliOverride: out)
 
-        // Non-blocking: permissions prompt on first recording, so warnings at
-        // startup are informational, not fatal.
+        // A failed check is never fatal here. The LaunchAgent is installed
+        // with KeepAlive{SuccessfulExit: false}, so exiting non-zero made
+        // launchd respawn quill every 10 seconds, forever, over something as
+        // ordinary as a denied microphone — burning CPU with nothing visible
+        // to the user. Start anyway and surface the problem where they will
+        // actually see it. `quill doctor` still exits non-zero; it is run by a
+        // human, not a supervisor.
         let checks = DoctorReport.run(recordingsRoot: root)
         if !DoctorReport.allOK(checks) {
             FileHandle.standardError.write(Data("startup checks failed:\n".utf8))
             DoctorReport.print(checks)
-            throw ExitCode(1)
         }
 
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
 
-        let controller = AppController(root: root)
+        let controller = AppController(root: root, checks: checks)
 
         let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         sigint.setEventHandler {
@@ -84,12 +89,13 @@ final class AppController {
     private var session: RecordingSession?
     private var ticker: Timer?
 
-    init(root: URL) {
+    init(root: URL, checks: [Check] = []) {
         self.root = root
         menuBar.onToggle = { [weak self] in self?.toggle() }
         menuBar.onOpenFolder = { [weak self] in self?.openFolder() }
         menuBar.onQuit = { [weak self] in self?.shutdown() }
         menuBar.update(recording: false, elapsed: nil)
+        menuBar.showProblems(checks.compactMap(Problem.init))
 
         Task { [transcription, root] in
             await transcription.setStatusHandler { status in
@@ -120,7 +126,9 @@ final class AppController {
             let newSession = try RecordingSession(root: root)
             try newSession.start()
             session = newSession
-            FileHandle.standardError.write(Data("● recording → \(newSession.dir.path)\n".utf8))
+            let dir = newSession.dir
+            Task { [transcription] in await transcription.setActiveSession(dir) }
+            FileHandle.standardError.write(Data("● recording → \(dir.path)\n".utf8))
         } catch {
             FileHandle.standardError.write(Data("recording start failed: \(error)\n".utf8))
             notifyUser(title: "quill — recording failed", body: "\(error)")
@@ -146,7 +154,12 @@ final class AppController {
         menuBar.update(recording: false, elapsed: nil)
 
         let dir = session.dir
-        Task { [transcription] in await transcription.enqueue(dir) }
+        Task { [transcription] in
+            // Clear first: both hops land on the same actor in order, so the
+            // session is no longer "live" by the time it is queued.
+            await transcription.setActiveSession(nil)
+            await transcription.enqueue(dir)
+        }
     }
 
     private func showTranscription(_ status: TranscriptionCoordinator.Status) {

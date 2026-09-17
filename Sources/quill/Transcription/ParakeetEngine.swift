@@ -1,6 +1,7 @@
 import AVFoundation
 import FluidAudio
 import Foundation
+import QuillCore
 
 /// Parakeet TDT 0.6B v2 (English) via FluidAudio's Core ML port. Models
 /// download once into FluidAudio's managed cache (~600 MB); after that,
@@ -60,44 +61,13 @@ actor ParakeetEngine: TranscriptionEngine {
                 ? []
                 : [TranscriptSegment(start: 0, end: result.duration, text: text)]
         }
-        return Self.segments(from: words)
+        return SegmentGrouping.segments(
+            from: words.map { TimedWord(text: $0.word, start: $0.startTime, end: $0.endTime) }
+        )
     }
 
     func release() async {
         if let manager { await manager.cleanup() }
         manager = nil
-    }
-
-    /// Group word timings into readable segments: break on sentence-ending
-    /// punctuation (parakeet v2 emits punctuation), a silence gap, or a hard
-    /// length cap so a run-on speaker still wraps.
-    private static func segments(from words: [WordTiming]) -> [TranscriptSegment] {
-        var out: [TranscriptSegment] = []
-        var current: [WordTiming] = []
-
-        func flush() {
-            guard let first = current.first, let last = current.last else { return }
-            out.append(TranscriptSegment(
-                start: first.startTime,
-                end: last.endTime,
-                text: current.map(\.word).joined(separator: " ")
-            ))
-            current = []
-        }
-
-        for word in words {
-            if let last = current.last, word.startTime - last.endTime > 1.0 {
-                flush()
-            }
-            current.append(word)
-            let endsSentence = word.word.hasSuffix(".")
-                || word.word.hasSuffix("?")
-                || word.word.hasSuffix("!")
-            if endsSentence || current.count >= 60 {
-                flush()
-            }
-        }
-        flush()
-        return out
     }
 }
